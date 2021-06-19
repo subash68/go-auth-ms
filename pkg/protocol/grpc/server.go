@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -13,9 +14,13 @@ import (
 
 
 func RunServer(ctx context.Context, v1API v1.AuthServiceServer, port string) error {
-	listen, err := net.Listen("tcp", ":"+port)
+	log.Println(port)
+
+	// listen, err := net.Listen("tcp", ":"+ port)
+	listen, err :=  net.Listen("tcp", fmt.Sprintf("localhost:%s", port))
 
 	if err != nil {
+		log.Println("Checking port number interpretation")
 		return err
 	}
 

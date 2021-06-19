@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 
+	_ "github.com/go-sql-driver/mysql"
+
 	"github.com/subash68/authenticator/pkg/protocol/grpc"
 	v1 "github.com/subash68/authenticator/pkg/service/v1"
 )
@@ -26,10 +28,10 @@ func RunServer() error {
 	var cfg Config
 
 	flag.StringVar(&cfg.GRPCPort, "grpc-port", "", "gRPC port to bind")
-	flag.StringVar(&cfg.GRPCPort, "db-host", "", "Database host")
-	flag.StringVar(&cfg.GRPCPort, "db-user", "", "Database user")
-	flag.StringVar(&cfg.GRPCPort, "db-password", "", "Database password")
-	flag.StringVar(&cfg.GRPCPort, "db-schema", "", "Database schema")
+	flag.StringVar(&cfg.DatastoreDBHost, "db-host", "", "Database host")
+	flag.StringVar(&cfg.DatastoreDBUser, "db-user", "", "Database user")
+	flag.StringVar(&cfg.DatastoreDBPassword, "db-password", "", "Database password")
+	flag.StringVar(&cfg.DatastoreDBSchema, "db-schema", "", "Database schema")
 	flag.Parse()
 
 	if len(cfg.GRPCPort) == 0 {

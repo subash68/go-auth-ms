@@ -4,9 +4,10 @@ import (
 	"context"
 	"database/sql"
 
-	v1 "github.com/subash68/authenticator/pkg/api/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	v1 "github.com/subash68/authenticator/pkg/api/v1"
 )
 
 
@@ -22,6 +23,7 @@ type authServiceServer struct {
 func NewAuthServiceServer(db *sql.DB) v1.AuthServiceServer {
 	return &authServiceServer{db: db}
 }
+
 
 func (s *authServiceServer) checkAPI (api string) error {
 	if len(api) > 0 {
@@ -61,7 +63,7 @@ func (s *authServiceServer) Create(ctx context.Context, req *v1.CreateRequest) (
 	// }
 
 	// insert ToDo entity data
-	res, err := c.ExecContext(ctx, "INSERT INTO ToDo(`Title`, `Description`) VALUES(?, ?)",
+	res, err := c.ExecContext(ctx, "INSERT INTO Auth(`Token`, `Description`) VALUES(?, ?)",
 		req.Auth.Token, req.Auth.Description)
 	if err != nil {
 		return nil, status.Error(codes.Unknown, "failed to insert into ToDo-> "+err.Error())
@@ -76,5 +78,43 @@ func (s *authServiceServer) Create(ctx context.Context, req *v1.CreateRequest) (
 	return &v1.CreateResponse{
 		Api: apiVersion,
 		Id:  id,
+	}, nil
+}
+
+
+
+// Read todo task
+func (s *authServiceServer) Read(ctx context.Context, req *v1.ReadRequest) (*v1.ReadResponse, error) {
+	
+
+	return &v1.ReadResponse{
+		Api:  apiVersion,
+		Auth: nil,
+	}, nil
+
+}
+
+// Update todo task
+func (s *authServiceServer) Update(ctx context.Context, req *v1.UpdateRequest) (*v1.UpdateResponse, error) {
+	return &v1.UpdateResponse{
+		Api:     apiVersion,
+		Updated: 0,
+	}, nil
+}
+
+// Delete todo task
+func (s *authServiceServer) Delete(ctx context.Context, req *v1.DeleteRequest) (*v1.DeleteResponse, error) {
+	
+	return &v1.DeleteResponse{
+		Api:     apiVersion,
+		Deleted: 0,
+	}, nil
+}
+
+// Read all todo tasks
+func (s *authServiceServer) ReadAll(ctx context.Context, req *v1.ReadAllRequest) (*v1.ReadAllResponse, error) {
+	return &v1.ReadAllResponse{
+		Api:   apiVersion,
+		Auth: nil,
 	}, nil
 }
