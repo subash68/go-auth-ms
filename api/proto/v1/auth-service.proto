@@ -1,0 +1,69 @@
+syntax = "proto3";
+package v1;
+
+option go_package = "v1/";
+
+message Auth {
+    int64 id = 1;
+    string token = 2;
+    string description = 3;
+}
+
+message CreateRequest {
+    string api = 1;
+    Auth auth = 2;
+}
+
+message CreateResponse {
+    string api = 1;
+    int64 id = 2;
+}
+
+message ReadRequest {
+    string api = 1;
+    int64 id = 2;
+}
+
+message ReadResponse {
+    string api = 1;
+    Auth auth = 2;
+}
+
+message UpdateRequest {
+    string api = 1;
+
+    Auth auth = 2;
+}
+
+message UpdateResponse {
+    string api = 1;
+    int64 updated = 2;
+}
+
+message DeleteRequest {
+    string api = 1;
+    int64 id = 2;
+}
+
+message DeleteResponse {
+    string api = 1;
+    int64 deleted = 2;
+}
+
+message ReadAllRequest {
+    string api = 1;
+}
+
+message ReadAllResponse {
+    string api = 1;
+    repeated Auth auth = 2;
+}
+
+
+service AuthService {
+    rpc Create(CreateRequest) returns (CreateResponse);
+    rpc Read(ReadRequest) returns (ReadResponse);
+    rpc Update(UpdateRequest) returns (UpdateResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+    rpc ReadAll(ReadAllRequest) returns (ReadAllResponse);
+}
