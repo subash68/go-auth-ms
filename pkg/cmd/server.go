@@ -9,12 +9,15 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/subash68/authenticator/pkg/protocol/grpc"
+	"github.com/subash68/authenticator/pkg/protocol/rest"
 	v1 "github.com/subash68/authenticator/pkg/service/v1"
 )
 
 
 type Config struct {
 	GRPCPort string
+
+	HTTPPort string
 
 	DatastoreDBHost string
 	DatastoreDBUser string
@@ -28,6 +31,7 @@ func RunServer() error {
 	var cfg Config
 
 	flag.StringVar(&cfg.GRPCPort, "grpc-port", "", "gRPC port to bind")
+	flag.StringVar(&cfg.HTTPPort, "http-port", "", "HTTP port to bind")
 	flag.StringVar(&cfg.DatastoreDBHost, "db-host", "", "Database host")
 	flag.StringVar(&cfg.DatastoreDBUser, "db-user", "", "Database user")
 	flag.StringVar(&cfg.DatastoreDBPassword, "db-password", "", "Database password")
@@ -36,6 +40,10 @@ func RunServer() error {
 
 	if len(cfg.GRPCPort) == 0 {
 		return fmt.Errorf("Invalid TCP port for gRPC server: '%s'", cfg.GRPCPort)
+	}
+
+	if len(cfg.HTTPPort) == 0 {
+		return fmt.Errorf("Invalid HTTP port for HTTP gateway: '%s'", cfg.HTTPPort)
 	}
 
 	param := "parseTime=true"
@@ -48,7 +56,6 @@ func RunServer() error {
 	param)
 
 	db, err := sql.Open("mysql", dsn)
-
 	if err != nil {
 		return fmt.Errorf("failed to open database: %v", err)
 	}
@@ -56,6 +63,10 @@ func RunServer() error {
 	defer db.Close()
 
 	v1API := v1.NewAuthServiceServer(db)
+
+	go func() {
+		_ = rest.RunServer(ctx, cfg.GRPCPort, cfg.HTTPPort)
+	}()
 
 	return grpc.RunServer(ctx, v1API, cfg.GRPCPort)
 }
