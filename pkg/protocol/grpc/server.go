@@ -9,6 +9,8 @@ import (
 	"os/signal"
 
 	v1 "github.com/subash68/authenticator/pkg/api/v1"
+	"github.com/subash68/authenticator/pkg/logger"
+	"github.com/subash68/authenticator/pkg/protocol/grpc/middleware"
 	"google.golang.org/grpc"
 )
 
@@ -24,7 +26,11 @@ func RunServer(ctx context.Context, v1API v1.AuthServiceServer, port string) err
 		return err
 	}
 
-	server := grpc.NewServer()
+	opts := []grpc.ServerOption{}
+
+	opts = middleware.AddLogging(logger.Log, opts)
+
+	server := grpc.NewServer(opts...)
 	v1.RegisterAuthServiceServer(server, v1API)
 
 	c := make(chan os.Signal, 1)
@@ -32,12 +38,12 @@ func RunServer(ctx context.Context, v1API v1.AuthServiceServer, port string) err
 
 	go func() {
 		for range c {
-			log.Println("shutting down gRPC server...")
+			logger.Log.Warn("shutting down gRPC server...")
 			server.GracefulStop()
 			<-ctx.Done()
 		}
 	}()
 
-	log.Println("starting gRPC server...")
+	logger.Log.Info("starting gRPC server...")
 	return server.Serve(listen)
 }
