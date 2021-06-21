@@ -8,6 +8,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/subash68/authenticator/pkg/logger"
 	"github.com/subash68/authenticator/pkg/protocol/grpc"
 	"github.com/subash68/authenticator/pkg/protocol/rest"
 	v1 "github.com/subash68/authenticator/pkg/service/v1"
@@ -23,6 +24,10 @@ type Config struct {
 	DatastoreDBUser string
 	DatastoreDBPassword string
 	DatastoreDBSchema string
+	
+	LogLevel int
+
+	LogTimeFormat string
 }
 
 func RunServer() error {
@@ -36,6 +41,8 @@ func RunServer() error {
 	flag.StringVar(&cfg.DatastoreDBUser, "db-user", "", "Database user")
 	flag.StringVar(&cfg.DatastoreDBPassword, "db-password", "", "Database password")
 	flag.StringVar(&cfg.DatastoreDBSchema, "db-schema", "", "Database schema")
+	flag.IntVar(&cfg.LogLevel, "log-level", 0, "Global  log level")
+	flag.StringVar(&cfg.LogTimeFormat, "log-time-format", "", "Print time format for logger")
 	flag.Parse()
 
 	if len(cfg.GRPCPort) == 0 {
@@ -44,6 +51,10 @@ func RunServer() error {
 
 	if len(cfg.HTTPPort) == 0 {
 		return fmt.Errorf("Invalid HTTP port for HTTP gateway: '%s'", cfg.HTTPPort)
+	}
+
+	if err := logger.Init(cfg.LogLevel, cfg.LogTimeFormat); err != nil {
+		return fmt.Errorf("failed to initialize logger: %v", err)
 	}
 
 	param := "parseTime=true"
