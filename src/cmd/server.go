@@ -8,23 +8,22 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/subash68/authenticator/pkg/logger"
-	"github.com/subash68/authenticator/pkg/protocol/grpc"
-	"github.com/subash68/authenticator/pkg/protocol/rest"
-	v1 "github.com/subash68/authenticator/pkg/service/v1"
+	"github.com/subash68/authenticator/src/logger"
+	"github.com/subash68/authenticator/src/protocol/grpc"
+	"github.com/subash68/authenticator/src/protocol/rest"
+	v1 "github.com/subash68/authenticator/src/service/v1"
 )
-
 
 type Config struct {
 	GRPCPort string
 
 	HTTPPort string
 
-	DatastoreDBHost string
-	DatastoreDBUser string
+	DatastoreDBHost     string
+	DatastoreDBUser     string
 	DatastoreDBPassword string
-	DatastoreDBSchema string
-	
+	DatastoreDBSchema   string
+
 	LogLevel int
 
 	LogTimeFormat string
@@ -60,11 +59,11 @@ func RunServer() error {
 	param := "parseTime=true"
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?%s",
-	cfg.DatastoreDBUser,
-	cfg.DatastoreDBPassword,
-	cfg.DatastoreDBHost,
-	cfg.DatastoreDBSchema,
-	param)
+		cfg.DatastoreDBUser,
+		cfg.DatastoreDBPassword,
+		cfg.DatastoreDBHost,
+		cfg.DatastoreDBSchema,
+		param)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

@@ -11,9 +11,9 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
-	v1 "github.com/subash68/authenticator/pkg/api/v1"
-	"github.com/subash68/authenticator/pkg/logger"
-	"github.com/subash68/authenticator/pkg/protocol/rest/middleware"
+	v1 "github.com/subash68/authenticator/src/api/v1"
+	"github.com/subash68/authenticator/src/logger"
+	"github.com/subash68/authenticator/src/protocol/rest/middleware"
 )
 
 func RunServer(ctx context.Context, grpcPort, httpPort string) error {
@@ -37,7 +37,7 @@ func RunServer(ctx context.Context, grpcPort, httpPort string) error {
 
 	go func() {
 		for range c {
-			// sig is a ^C, handle it 
+			// sig is a ^C, handle it
 			// How ? :-)
 		}
 

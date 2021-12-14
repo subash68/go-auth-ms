@@ -8,18 +8,17 @@ import (
 	"os"
 	"os/signal"
 
-	v1 "github.com/subash68/authenticator/pkg/api/v1"
-	"github.com/subash68/authenticator/pkg/logger"
-	"github.com/subash68/authenticator/pkg/protocol/grpc/middleware"
+	v1 "github.com/subash68/authenticator/src/api/v1"
+	"github.com/subash68/authenticator/src/logger"
+	"github.com/subash68/authenticator/src/protocol/grpc/middleware"
 	"google.golang.org/grpc"
 )
-
 
 func RunServer(ctx context.Context, v1API v1.AuthServiceServer, port string) error {
 	log.Println(port)
 
 	// listen, err := net.Listen("tcp", ":"+ port)
-	listen, err :=  net.Listen("tcp", fmt.Sprintf("localhost:%s", port))
+	listen, err := net.Listen("tcp", fmt.Sprintf("localhost:%s", port))
 
 	if err != nil {
 		log.Println("Checking port number interpretation")

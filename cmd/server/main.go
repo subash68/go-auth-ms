@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	cmd "github.com/subash68/authenticator/pkg/cmd"
+	cmd "github.com/subash68/authenticator/src/cmd"
 )
 
 func main() {

@@ -7,9 +7,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	v1 "github.com/subash68/authenticator/pkg/api/v1"
+	v1 "github.com/subash68/authenticator/src/api/v1"
 )
-
 
 const (
 	apiVersion = "v1"
@@ -24,8 +23,7 @@ func NewAuthServiceServer(db *sql.DB) v1.AuthServiceServer {
 	return &authServiceServer{db: db}
 }
 
-
-func (s *authServiceServer) checkAPI (api string) error {
+func (s *authServiceServer) checkAPI(api string) error {
 	if len(api) > 0 {
 		if apiVersion != api {
 			return status.Errorf(codes.Unimplemented, "unsupported API version: service implements API version '%s', but asked for '%s'", apiVersion, api)
@@ -81,11 +79,8 @@ func (s *authServiceServer) Create(ctx context.Context, req *v1.CreateRequest) (
 	}, nil
 }
 
-
-
 // Read todo task
 func (s *authServiceServer) Read(ctx context.Context, req *v1.ReadRequest) (*v1.ReadResponse, error) {
-	
 
 	return &v1.ReadResponse{
 		Api:  apiVersion,
@@ -104,7 +99,7 @@ func (s *authServiceServer) Update(ctx context.Context, req *v1.UpdateRequest) (
 
 // Delete todo task
 func (s *authServiceServer) Delete(ctx context.Context, req *v1.DeleteRequest) (*v1.DeleteResponse, error) {
-	
+
 	return &v1.DeleteResponse{
 		Api:     apiVersion,
 		Deleted: 0,
@@ -114,7 +109,7 @@ func (s *authServiceServer) Delete(ctx context.Context, req *v1.DeleteRequest) (
 // Read all todo tasks
 func (s *authServiceServer) ReadAll(ctx context.Context, req *v1.ReadAllRequest) (*v1.ReadAllResponse, error) {
 	return &v1.ReadAllResponse{
-		Api:   apiVersion,
+		Api:  apiVersion,
 		Auth: nil,
 	}, nil
 }
