@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: envoy-proxy
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: go-auth-ms
+spec:
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+  # ClusterIP keeps MySQL internal; no external exposure needed.
+  type: ClusterIP

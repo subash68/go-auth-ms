@@ -2,15 +2,17 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	v1 "github.com/subash68/authenticator/src/api/v1"
+	"github.com/DATA-DOG/go-sqlmock"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	v1 "github.com/subash68/authenticator/src/api/v1"
 )
 
-// newTestServer creates a server backed by a mock DB.
+// helper: create a server backed by a mock DB
 func newTestServer(t *testing.T) (v1.AuthServiceServer, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -21,238 +23,287 @@ func newTestServer(t *testing.T) (v1.AuthServiceServer, sqlmock.Sqlmock) {
 	return NewAuthServiceServer(db), mock
 }
 
-// ── checkAPI ──────────────────────────────────────────────────────────────────
-
-func TestCheckAPI_ValidVersion(t *testing.T) {
-	s := &authServiceServer{}
-	if err := s.checkAPI("v1"); err != nil {
-		t.Errorf("expected no error for valid API version, got %v", err)
-	}
-}
-
-func TestCheckAPI_EmptyVersion(t *testing.T) {
-	// Empty string means "don't check" — should pass.
-	s := &authServiceServer{}
-	if err := s.checkAPI(""); err != nil {
-		t.Errorf("expected no error for empty API version, got %v", err)
-	}
-}
-
-func TestCheckAPI_UnsupportedVersion(t *testing.T) {
-	s := &authServiceServer{}
-	err := s.checkAPI("v2")
+// helper: extract the gRPC code from an error
+func grpcCode(err error) codes.Code {
 	if err == nil {
-		t.Fatal("expected error for unsupported API version, got nil")
+		return codes.OK
 	}
-	st, ok := status.FromError(err)
+	s, ok := status.FromError(err)
 	if !ok {
-		t.Fatalf("expected gRPC status error, got %T", err)
+		return codes.Unknown
 	}
-	if st.Code() != codes.Unimplemented {
-		t.Errorf("expected code Unimplemented, got %v", st.Code())
-	}
+	return s.Code()
 }
 
-// ── Create ────────────────────────────────────────────────────────────────────
-
-func TestCreate_Success(t *testing.T) {
-	srv, mock := newTestServer(t)
-
-	mock.ExpectExec("INSERT INTO Auth").
-		WithArgs("tok-abc", "test token").
-		WillReturnResult(sqlmock.NewResult(42, 1))
-
-	resp, err := srv.Create(context.Background(), &v1.CreateRequest{
-		Api: "v1",
-		Auth: &v1.Auth{
-			Token:       "tok-abc",
-			Description: "test token",
+func TestCreate(t *testing.T) {
+	tests := []struct {
+		name     string
+		req      *v1.CreateRequest
+		setup    func(sqlmock.Sqlmock)
+		wantID   int64
+		wantCode codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.CreateRequest{Api: "v1", Auth: &v1.Auth{Token: "tok1", Description: "desc1"}},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("INSERT INTO Auth").WithArgs("tok1", "desc1").WillReturnResult(sqlmock.NewResult(42, 1))
+			},
+			wantID: 42, wantCode: codes.OK,
 		},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		{
+			name:     "wrong api version",
+			req:      &v1.CreateRequest{Api: "v2", Auth: &v1.Auth{Token: "tok", Description: "desc"}},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.Unimplemented,
+		},
+		{
+			name: "db insert error",
+			req:  &v1.CreateRequest{Api: "v1", Auth: &v1.Auth{Token: "tok", Description: "desc"}},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("INSERT INTO Auth").WithArgs("tok", "desc").WillReturnError(errors.New("insert failed"))
+			},
+			wantCode: codes.Unknown,
+		},
 	}
-	if resp.Api != "v1" {
-		t.Errorf("expected api=v1, got %s", resp.Api)
-	}
-	if resp.Id != 42 {
-		t.Errorf("expected id=42, got %d", resp.Id)
-	}
-}
-
-func TestCreate_WrongAPIVersion(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	_, err := srv.Create(context.Background(), &v1.CreateRequest{
-		Api:  "v99",
-		Auth: &v1.Auth{Token: "tok", Description: "desc"},
-	})
-	if err == nil {
-		t.Fatal("expected error for wrong API version, got nil")
-	}
-	if st, _ := status.FromError(err); st.Code() != codes.Unimplemented {
-		t.Errorf("expected Unimplemented, got %v", st.Code())
-	}
-}
-
-func TestCreate_DBInsertError(t *testing.T) {
-	srv, mock := newTestServer(t)
-
-	mock.ExpectExec("INSERT INTO Auth").
-		WithArgs("tok-fail", "desc").
-		WillReturnError(errDBFailure("connection reset"))
-
-	_, err := srv.Create(context.Background(), &v1.CreateRequest{
-		Api:  "v1",
-		Auth: &v1.Auth{Token: "tok-fail", Description: "desc"},
-	})
-	if err == nil {
-		t.Fatal("expected error on DB failure, got nil")
-	}
-	if st, _ := status.FromError(err); st.Code() != codes.Unknown {
-		t.Errorf("expected Unknown, got %v", st.Code())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.Create(context.Background(), tc.req)
+			if grpcCode(err) != tc.wantCode {
+				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil { t.Fatal("expected non-nil response") }
+				if resp.Id != tc.wantID { t.Errorf("got id %d, want %d", resp.Id, tc.wantID) }
+				if resp.Api != apiVersion { t.Errorf("got api %q, want %q", resp.Api, apiVersion) }
+			}
+			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+		})
 	}
 }
 
-func TestCreate_NilAuth(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	// Passing nil Auth should panic or return an error — either is acceptable
-	// currently; this test documents the behaviour.
-	defer func() { recover() }() // swallow panic if it occurs
-	resp, err := srv.Create(context.Background(), &v1.CreateRequest{
-		Api:  "v1",
-		Auth: nil,
-	})
-	// If we reach here without panic, an error is expected.
-	if err == nil && resp != nil {
-		t.Error("expected error or panic when Auth is nil")
+func TestRead(t *testing.T) {
+	cols := []string{"ID", "Token", "Description"}
+	tests := []struct {
+		name     string
+		req      *v1.ReadRequest
+		setup    func(sqlmock.Sqlmock)
+		wantAuth *v1.Auth
+		wantCode codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.ReadRequest{Api: "v1", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(1)).
+					WillReturnRows(sqlmock.NewRows(cols).AddRow(1, "tok1", "desc1"))
+			},
+			wantAuth: &v1.Auth{Id: 1, Token: "tok1", Description: "desc1"}, wantCode: codes.OK,
+		},
+		{
+			name: "not found",
+			req:  &v1.ReadRequest{Api: "v1", Id: 99},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(99)).WillReturnRows(sqlmock.NewRows(cols))
+			},
+			wantCode: codes.NotFound,
+		},
+		{
+			name: "wrong api version", req: &v1.ReadRequest{Api: "v2", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+		},
+		{
+			name: "db query error",
+			req:  &v1.ReadRequest{Api: "v1", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(1)).WillReturnError(errors.New("query failed"))
+			},
+			wantCode: codes.Unknown,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.Read(context.Background(), tc.req)
+			if grpcCode(err) != tc.wantCode {
+				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil || resp.Auth == nil { t.Fatal("expected non-nil response and auth") }
+				if resp.Auth.Id != tc.wantAuth.Id || resp.Auth.Token != tc.wantAuth.Token || resp.Auth.Description != tc.wantAuth.Description {
+					t.Errorf("got auth %+v, want %+v", resp.Auth, tc.wantAuth)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+		})
 	}
 }
 
-// ── Read ──────────────────────────────────────────────────────────────────────
-
-func TestRead_StubReturnsNilAuth(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Read(context.Background(), &v1.ReadRequest{Api: "v1", Id: 1})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestUpdate(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         *v1.UpdateRequest
+		setup       func(sqlmock.Sqlmock)
+		wantUpdated int64
+		wantCode    codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 1, Token: "new-tok", Description: "new-desc"}},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE Auth").WithArgs("new-tok", "new-desc", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			wantUpdated: 1, wantCode: codes.OK,
+		},
+		{
+			name: "not found",
+			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 99, Token: "tok", Description: "desc"}},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE Auth").WithArgs("tok", "desc", int64(99)).WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			wantCode: codes.NotFound,
+		},
+		{
+			name: "wrong api version",
+			req:  &v1.UpdateRequest{Api: "v2", Auth: &v1.Auth{Id: 1, Token: "tok", Description: "desc"}},
+			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+		},
+		{
+			name: "db exec error",
+			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 1, Token: "tok", Description: "desc"}},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE Auth").WithArgs("tok", "desc", int64(1)).WillReturnError(errors.New("update failed"))
+			},
+			wantCode: codes.Unknown,
+		},
 	}
-	if resp.Api != "v1" {
-		t.Errorf("expected api=v1, got %s", resp.Api)
-	}
-	if resp.Auth != nil {
-		t.Errorf("stub: expected nil Auth, got %+v", resp.Auth)
-	}
-}
-
-func TestRead_WrongAPIVersion(t *testing.T) {
-	// Stub doesn't call checkAPI yet — documents current (incomplete) behaviour.
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Read(context.Background(), &v1.ReadRequest{Api: "v99", Id: 1})
-	// Current stub ignores version; document what it returns.
-	if err != nil {
-		t.Logf("Read returned error (expected once implemented): %v", err)
-		return
-	}
-	t.Logf("Read stub returned resp=%+v (API version check not yet enforced)", resp)
-}
-
-// ── Update ────────────────────────────────────────────────────────────────────
-
-func TestUpdate_StubReturnsZero(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Update(context.Background(), &v1.UpdateRequest{
-		Api:  "v1",
-		Auth: &v1.Auth{Id: 1, Token: "new-tok", Description: "updated"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.Api != "v1" {
-		t.Errorf("expected api=v1, got %s", resp.Api)
-	}
-	if resp.Updated != 0 {
-		t.Errorf("stub: expected Updated=0, got %d", resp.Updated)
-	}
-}
-
-func TestUpdate_WrongAPIVersion(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Update(context.Background(), &v1.UpdateRequest{
-		Api:  "v99",
-		Auth: &v1.Auth{Id: 1, Token: "tok", Description: "desc"},
-	})
-	if err != nil {
-		t.Logf("Update returned error (expected once implemented): %v", err)
-		return
-	}
-	t.Logf("Update stub returned resp=%+v (API version check not yet enforced)", resp)
-}
-
-// ── Delete ────────────────────────────────────────────────────────────────────
-
-func TestDelete_StubReturnsZero(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Delete(context.Background(), &v1.DeleteRequest{Api: "v1", Id: 1})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.Api != "v1" {
-		t.Errorf("expected api=v1, got %s", resp.Api)
-	}
-	if resp.Deleted != 0 {
-		t.Errorf("stub: expected Deleted=0, got %d", resp.Deleted)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.Update(context.Background(), tc.req)
+			if grpcCode(err) != tc.wantCode {
+				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil { t.Fatal("expected non-nil response") }
+				if resp.Updated != tc.wantUpdated { t.Errorf("got updated %d, want %d", resp.Updated, tc.wantUpdated) }
+			}
+			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+		})
 	}
 }
 
-func TestDelete_WrongAPIVersion(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.Delete(context.Background(), &v1.DeleteRequest{Api: "v99", Id: 1})
-	if err != nil {
-		t.Logf("Delete returned error (expected once implemented): %v", err)
-		return
+func TestDelete(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         *v1.DeleteRequest
+		setup       func(sqlmock.Sqlmock)
+		wantDeleted int64
+		wantCode    codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.DeleteRequest{Api: "v1", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			wantDeleted: 1, wantCode: codes.OK,
+		},
+		{
+			name: "not found",
+			req:  &v1.DeleteRequest{Api: "v1", Id: 99},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(99)).WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			wantCode: codes.NotFound,
+		},
+		{
+			name: "wrong api version", req: &v1.DeleteRequest{Api: "v2", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+		},
+		{
+			name: "db exec error",
+			req:  &v1.DeleteRequest{Api: "v1", Id: 1},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(1)).WillReturnError(errors.New("delete failed"))
+			},
+			wantCode: codes.Unknown,
+		},
 	}
-	t.Logf("Delete stub returned resp=%+v (API version check not yet enforced)", resp)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.Delete(context.Background(), tc.req)
+			if grpcCode(err) != tc.wantCode {
+				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil { t.Fatal("expected non-nil response") }
+				if resp.Deleted != tc.wantDeleted { t.Errorf("got deleted %d, want %d", resp.Deleted, tc.wantDeleted) }
+			}
+			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+		})
+	}
 }
 
-// ── ReadAll ───────────────────────────────────────────────────────────────────
-
-func TestReadAll_StubReturnsEmptyList(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.ReadAll(context.Background(), &v1.ReadAllRequest{Api: "v1"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestReadAll(t *testing.T) {
+	cols := []string{"ID", "Token", "Description"}
+	tests := []struct {
+		name     string
+		req      *v1.ReadAllRequest
+		setup    func(sqlmock.Sqlmock)
+		wantLen  int
+		wantCode codes.Code
+	}{
+		{
+			name: "success multiple rows",
+			req:  &v1.ReadAllRequest{Api: "v1"},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth").
+					WillReturnRows(sqlmock.NewRows(cols).AddRow(1, "tok1", "desc1").AddRow(2, "tok2", "desc2"))
+			},
+			wantLen: 2, wantCode: codes.OK,
+		},
+		{
+			name: "empty table",
+			req:  &v1.ReadAllRequest{Api: "v1"},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth").WillReturnRows(sqlmock.NewRows(cols))
+			},
+			wantLen: 0, wantCode: codes.OK,
+		},
+		{
+			name: "wrong api version", req: &v1.ReadAllRequest{Api: "v2"},
+			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+		},
+		{
+			name: "db query error",
+			req:  &v1.ReadAllRequest{Api: "v1"},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT (.+) FROM Auth").WillReturnError(errors.New("query failed"))
+			},
+			wantCode: codes.Unknown,
+		},
 	}
-	if resp.Api != "v1" {
-		t.Errorf("expected api=v1, got %s", resp.Api)
-	}
-	if len(resp.Auth) != 0 {
-		t.Errorf("stub: expected empty Auth list, got %d items", len(resp.Auth))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.ReadAll(context.Background(), tc.req)
+			if grpcCode(err) != tc.wantCode {
+				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil { t.Fatal("expected non-nil response") }
+				if len(resp.Auth) != tc.wantLen { t.Errorf("got %d rows, want %d", len(resp.Auth), tc.wantLen) }
+				if resp.Api != apiVersion { t.Errorf("got api %q, want %q", resp.Api, apiVersion) }
+			}
+			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+		})
 	}
 }
-
-func TestReadAll_WrongAPIVersion(t *testing.T) {
-	srv, _ := newTestServer(t)
-
-	resp, err := srv.ReadAll(context.Background(), &v1.ReadAllRequest{Api: "v99"})
-	if err != nil {
-		t.Logf("ReadAll returned error (expected once implemented): %v", err)
-		return
-	}
-	t.Logf("ReadAll stub returned resp=%+v (API version check not yet enforced)", resp)
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-// errDBFailure is a simple error type used to simulate database failures.
-type errDBFailure string
-
-func (e errDBFailure) Error() string { return string(e) }

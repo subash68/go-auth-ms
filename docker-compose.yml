@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+
+  # ── MySQL ──────────────────────────────────────────────────────────────────
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: authdb
+      MYSQL_USER: authuser
+      MYSQL_PASSWORD: authpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Auth microservice ──────────────────────────────────────────────────────
+  server:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GRPC_PORT: 9090
+      HTTP_PORT: 8080
+    command:
+      - "-grpc-port=9090"
+      - "-http-port=8080"
+      - "-db-host=db:3306"
+      - "-db-user=authuser"
+      - "-db-password=authpass"
+      - "-db-schema=authdb"
+      - "-log-level=0"
+      - "-log-time-format=2006-01-02T15:04:05.999999999Z07:00"
+    ports:
+      - "9090:9090"
+      - "8080:8080"
+
+  # ── Unit + integration tests ───────────────────────────────────────────────
+  test:
+    image: golang:1.21-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Integration tests can use this DSN; unit tests use sqlmock (no DB needed)
+      TEST_DB_DSN: "authuser:authpass@tcp(db:3306)/authdb?parseTime=true"
+    command: >
+      sh -c "apk add --no-cache git &&
+             go test -v -count=1 ./..."
+
+volumes:
+  db_data:

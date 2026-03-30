@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: envoy-proxy
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/part-of: go-auth-ms
+spec:
+  selector:
+    app: auth-service
+  ports:
+    - name: grpc
+      port: 9090
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  # NodePort exposes both ports on each node for easy local testing.
+  # Switch to LoadBalancer for cloud environments, or ClusterIP + Ingress
+  # for production.
+  type: NodePort

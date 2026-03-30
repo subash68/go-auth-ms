@@ -81,35 +81,136 @@ func (s *authServiceServer) Create(ctx context.Context, req *v1.CreateRequest) (
 
 // Read todo task
 func (s *authServiceServer) Read(ctx context.Context, req *v1.ReadRequest) (*v1.ReadResponse, error) {
+	if err := s.checkAPI(req.Api); err != nil {
+		return nil, err
+	}
+
+	c, err := s.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	rows, err := c.QueryContext(ctx, "SELECT `ID`, `Token`, `Description` FROM Auth WHERE `ID`=?", req.Id)
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to select from Auth-> "+err.Error())
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, status.Error(codes.Unknown, "failed to retrieve data from Auth-> "+err.Error())
+		}
+		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Id)
+	}
+
+	var auth v1.Auth
+	if err := rows.Scan(&auth.Id, &auth.Token, &auth.Description); err != nil {
+		return nil, status.Error(codes.Unknown, "failed to retrieve field values from Auth row-> "+err.Error())
+	}
 
 	return &v1.ReadResponse{
 		Api:  apiVersion,
-		Auth: nil,
+		Auth: &auth,
 	}, nil
-
 }
 
 // Update todo task
 func (s *authServiceServer) Update(ctx context.Context, req *v1.UpdateRequest) (*v1.UpdateResponse, error) {
+	if err := s.checkAPI(req.Api); err != nil {
+		return nil, err
+	}
+
+	c, err := s.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	res, err := c.ExecContext(ctx, "UPDATE Auth SET `Token`=?, `Description`=? WHERE `ID`=?",
+		req.Auth.Token, req.Auth.Description, req.Auth.Id)
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to update Auth-> "+err.Error())
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to retrieve rows affected value-> "+err.Error())
+	}
+	if rows == 0 {
+		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Auth.Id)
+	}
+
 	return &v1.UpdateResponse{
 		Api:     apiVersion,
-		Updated: 0,
+		Updated: rows,
 	}, nil
 }
 
 // Delete todo task
 func (s *authServiceServer) Delete(ctx context.Context, req *v1.DeleteRequest) (*v1.DeleteResponse, error) {
+	if err := s.checkAPI(req.Api); err != nil {
+		return nil, err
+	}
+
+	c, err := s.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	res, err := c.ExecContext(ctx, "DELETE FROM Auth WHERE `ID`=?", req.Id)
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to delete from Auth-> "+err.Error())
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to retrieve rows affected value-> "+err.Error())
+	}
+	if rows == 0 {
+		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Id)
+	}
 
 	return &v1.DeleteResponse{
 		Api:     apiVersion,
-		Deleted: 0,
+		Deleted: rows,
 	}, nil
 }
 
 // Read all todo tasks
 func (s *authServiceServer) ReadAll(ctx context.Context, req *v1.ReadAllRequest) (*v1.ReadAllResponse, error) {
+	if err := s.checkAPI(req.Api); err != nil {
+		return nil, err
+	}
+
+	c, err := s.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	rows, err := c.QueryContext(ctx, "SELECT `ID`, `Token`, `Description` FROM Auth")
+	if err != nil {
+		return nil, status.Error(codes.Unknown, "failed to select from Auth-> "+err.Error())
+	}
+	defer rows.Close()
+
+	var list []*v1.Auth
+	for rows.Next() {
+		auth := new(v1.Auth)
+		if err := rows.Scan(&auth.Id, &auth.Token, &auth.Description); err != nil {
+			return nil, status.Error(codes.Unknown, "failed to retrieve field values from Auth row-> "+err.Error())
+		}
+		list = append(list, auth)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, status.Error(codes.Unknown, "failed to retrieve data from Auth-> "+err.Error())
+	}
+
 	return &v1.ReadAllResponse{
 		Api:  apiVersion,
-		Auth: nil,
+		Auth: list,
 	}, nil
 }
