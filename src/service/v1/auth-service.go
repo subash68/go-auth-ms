@@ -2,8 +2,16 @@ package v1
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"fmt"
+	"regexp"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -11,206 +19,301 @@ import (
 )
 
 const (
-	apiVersion = "v1"
+	accessTokenTTL  = 15 * time.Minute
+	refreshTokenTTL = 7 * 24 * time.Hour
+
+	// JWTSecret should come from env/config in production.
+	jwtSecret = "change-me-in-production"
 )
 
+var usernameRE = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
 type authServiceServer struct {
+	v1.UnimplementedAuthServiceServer
 	db *sql.DB
 }
 
-// This dependency injection should be verified
 func NewAuthServiceServer(db *sql.DB) v1.AuthServiceServer {
 	return &authServiceServer{db: db}
 }
 
-func (s *authServiceServer) checkAPI(api string) error {
-	if len(api) > 0 {
-		if apiVersion != api {
-			return status.Errorf(codes.Unimplemented, "unsupported API version: service implements API version '%s', but asked for '%s'", apiVersion, api)
+// ─────────────────────────────────────────────────────────────
+// Register
+// ─────────────────────────────────────────────────────────────
+
+func (s *authServiceServer) Register(ctx context.Context, req *v1.RegisterRequest) (*v1.RegisterResponse, error) {
+	if req.Username == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
+		return nil, status.Error(codes.InvalidArgument, "username, password, first_name and last_name are required")
+	}
+	if !usernameRE.MatchString(req.Username) {
+		return nil, status.Error(codes.InvalidArgument, "username must be alphanumeric (a-z, A-Z, 0-9, underscore)")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to hash password")
+	}
+
+	userID := uuid.New().String()
+	var email *string
+	if req.Email != "" {
+		email = &req.Email
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to begin transaction")
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO users (id, username, first_name, last_name, email, password_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		userID, req.Username, req.FirstName, req.LastName, email, string(hash),
+	)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, status.Error(codes.AlreadyExists, "username or email already taken")
 		}
+		return nil, status.Error(codes.Internal, "failed to create user: "+err.Error())
 	}
 
-	return nil
-}
-
-func (s *authServiceServer) connect(ctx context.Context) (*sql.Conn, error) {
-	c, err := s.db.Conn(ctx)
+	// Assign default 'user' role
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO user_roles (user_id, role_id)
+		 SELECT $1, id FROM roles WHERE name = 'user'`,
+		userID,
+	)
 	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to connect to database-> "+err.Error())
-	}
-	return c, nil
-}
-
-// Create new todo task
-func (s *authServiceServer) Create(ctx context.Context, req *v1.CreateRequest) (*v1.CreateResponse, error) {
-	// check if the API version requested by client is supported by server
-	if err := s.checkAPI(req.Api); err != nil {
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to assign default role: "+err.Error())
 	}
 
-	// get SQL connection from pool
-	c, err := s.connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-
-	// reminder, err := ptypes.Timestamp(req.ToDo.Reminder)
-	// if err != nil {
-	// 	return nil, status.Error(codes.InvalidArgument, "reminder field has invalid format-> "+err.Error())
-	// }
-
-	// insert ToDo entity data
-	res, err := c.ExecContext(ctx, "INSERT INTO Auth(`Token`, `Description`) VALUES(?, ?)",
-		req.Auth.Token, req.Auth.Description)
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to insert into ToDo-> "+err.Error())
+	if err := tx.Commit(); err != nil {
+		return nil, status.Error(codes.Internal, "failed to commit transaction")
 	}
 
-	// get ID of creates ToDo
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to retrieve id for created ToDo-> "+err.Error())
-	}
-
-	return &v1.CreateResponse{
-		Api: apiVersion,
-		Id:  id,
+	return &v1.RegisterResponse{
+		UserId:   userID,
+		Username: req.Username,
 	}, nil
 }
 
-// Read todo task
-func (s *authServiceServer) Read(ctx context.Context, req *v1.ReadRequest) (*v1.ReadResponse, error) {
-	if err := s.checkAPI(req.Api); err != nil {
-		return nil, err
+// ─────────────────────────────────────────────────────────────
+// Login
+// ─────────────────────────────────────────────────────────────
+
+func (s *authServiceServer) Login(ctx context.Context, req *v1.LoginRequest) (*v1.LoginResponse, error) {
+	if req.Username == "" || req.Password == "" {
+		return nil, status.Error(codes.InvalidArgument, "username and password are required")
 	}
 
-	c, err := s.connect(ctx)
+	var (
+		userID       string
+		passwordHash string
+		firstName    string
+		lastName     string
+		email        sql.NullString
+		isActive     bool
+	)
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, password_hash, first_name, last_name, email, is_active
+		 FROM users
+		 WHERE username = $1 AND deleted_at IS NULL`,
+		req.Username,
+	).Scan(&userID, &passwordHash, &firstName, &lastName, &email, &isActive)
+
+	if err == sql.ErrNoRows {
+		return nil, status.Error(codes.Unauthenticated, "invalid username or password")
+	}
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to query user: "+err.Error())
 	}
-	defer c.Close()
+	if !isActive {
+		return nil, status.Error(codes.PermissionDenied, "account is inactive")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		return nil, status.Error(codes.Unauthenticated, "invalid username or password")
+	}
 
-	rows, err := c.QueryContext(ctx, "SELECT `ID`, `Token`, `Description` FROM Auth WHERE `ID`=?", req.Id)
+	accessToken, err := generateAccessToken(userID, req.Username)
 	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to select from Auth-> "+err.Error())
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return nil, status.Error(codes.Unknown, "failed to retrieve data from Auth-> "+err.Error())
-		}
-		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Id)
+		return nil, status.Error(codes.Internal, "failed to generate access token")
 	}
 
-	var auth v1.Auth
-	if err := rows.Scan(&auth.Id, &auth.Token, &auth.Description); err != nil {
-		return nil, status.Error(codes.Unknown, "failed to retrieve field values from Auth row-> "+err.Error())
+	refreshToken, err := generateRefreshToken()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to generate refresh token")
 	}
 
-	return &v1.ReadResponse{
-		Api:  apiVersion,
-		Auth: &auth,
+	expiresAt := time.Now().Add(refreshTokenTTL)
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO sessions (id, user_id, refresh_token, expires_at)
+		 VALUES ($1, $2, $3, $4)`,
+		uuid.New().String(), userID, refreshToken, expiresAt,
+	)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to create session: "+err.Error())
+	}
+
+	emailStr := ""
+	if email.Valid {
+		emailStr = email.String
+	}
+
+	return &v1.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    int64(accessTokenTTL.Seconds()),
+		User: &v1.User{
+			Id:        userID,
+			Username:  req.Username,
+			FirstName: firstName,
+			LastName:  lastName,
+			Email:     emailStr,
+			IsActive:  isActive,
+		},
 	}, nil
 }
 
-// Update todo task
-func (s *authServiceServer) Update(ctx context.Context, req *v1.UpdateRequest) (*v1.UpdateResponse, error) {
-	if err := s.checkAPI(req.Api); err != nil {
-		return nil, err
+// ─────────────────────────────────────────────────────────────
+// Logout
+// ─────────────────────────────────────────────────────────────
+
+func (s *authServiceServer) Logout(ctx context.Context, req *v1.LogoutRequest) (*v1.LogoutResponse, error) {
+	if req.RefreshToken == "" {
+		return nil, status.Error(codes.InvalidArgument, "refresh_token is required")
 	}
 
-	c, err := s.connect(ctx)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sessions
+		 SET is_revoked = TRUE, revoked_at = NOW()
+		 WHERE refresh_token = $1 AND is_revoked = FALSE`,
+		req.RefreshToken,
+	)
 	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-
-	res, err := c.ExecContext(ctx, "UPDATE Auth SET `Token`=?, `Description`=? WHERE `ID`=?",
-		req.Auth.Token, req.Auth.Description, req.Auth.Id)
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to update Auth-> "+err.Error())
+		return nil, status.Error(codes.Internal, "failed to revoke session: "+err.Error())
 	}
 
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to retrieve rows affected value-> "+err.Error())
-	}
+	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Auth.Id)
+		return nil, status.Error(codes.NotFound, "session not found or already revoked")
 	}
 
-	return &v1.UpdateResponse{
-		Api:     apiVersion,
-		Updated: rows,
+	return &v1.LogoutResponse{
+		Success: true,
+		Message: "logged out successfully",
 	}, nil
 }
 
-// Delete todo task
-func (s *authServiceServer) Delete(ctx context.Context, req *v1.DeleteRequest) (*v1.DeleteResponse, error) {
-	if err := s.checkAPI(req.Api); err != nil {
-		return nil, err
+// ─────────────────────────────────────────────────────────────
+// RefreshToken
+// ─────────────────────────────────────────────────────────────
+
+func (s *authServiceServer) RefreshToken(ctx context.Context, req *v1.RefreshTokenRequest) (*v1.RefreshTokenResponse, error) {
+	if req.RefreshToken == "" {
+		return nil, status.Error(codes.InvalidArgument, "refresh_token is required")
 	}
 
-	c, err := s.connect(ctx)
+	var (
+		userID   string
+		username string
+	)
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT s.user_id, u.username
+		 FROM sessions s
+		 JOIN users u ON u.id = s.user_id
+		 WHERE s.refresh_token = $1
+		   AND s.is_revoked = FALSE
+		   AND s.expires_at > NOW()
+		   AND u.deleted_at IS NULL
+		   AND u.is_active = TRUE`,
+		req.RefreshToken,
+	).Scan(&userID, &username)
+
+	if err == sql.ErrNoRows {
+		return nil, status.Error(codes.Unauthenticated, "refresh token is invalid or expired")
+	}
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.Internal, "failed to validate refresh token: "+err.Error())
 	}
-	defer c.Close()
 
-	res, err := c.ExecContext(ctx, "DELETE FROM Auth WHERE `ID`=?", req.Id)
+	accessToken, err := generateAccessToken(userID, username)
 	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to delete from Auth-> "+err.Error())
+		return nil, status.Error(codes.Internal, "failed to generate access token")
 	}
 
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to retrieve rows affected value-> "+err.Error())
-	}
-	if rows == 0 {
-		return nil, status.Errorf(codes.NotFound, "Auth with ID='%d' is not found", req.Id)
-	}
-
-	return &v1.DeleteResponse{
-		Api:     apiVersion,
-		Deleted: rows,
+	return &v1.RefreshTokenResponse{
+		AccessToken: accessToken,
+		TokenType:   "Bearer",
+		ExpiresIn:   int64(accessTokenTTL.Seconds()),
 	}, nil
 }
 
-// Read all todo tasks
-func (s *authServiceServer) ReadAll(ctx context.Context, req *v1.ReadAllRequest) (*v1.ReadAllResponse, error) {
-	if err := s.checkAPI(req.Api); err != nil {
-		return nil, err
-	}
+// ─────────────────────────────────────────────────────────────
+// GetProfile / AssignRole / GetPermissions — stubs (not in scope)
+// ─────────────────────────────────────────────────────────────
 
-	c, err := s.connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
+func (s *authServiceServer) GetProfile(ctx context.Context, req *v1.GetProfileRequest) (*v1.GetProfileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not implemented")
+}
 
-	rows, err := c.QueryContext(ctx, "SELECT `ID`, `Token`, `Description` FROM Auth")
-	if err != nil {
-		return nil, status.Error(codes.Unknown, "failed to select from Auth-> "+err.Error())
-	}
-	defer rows.Close()
+func (s *authServiceServer) AssignRole(ctx context.Context, req *v1.AssignRoleRequest) (*v1.AssignRoleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not implemented")
+}
 
-	var list []*v1.Auth
-	for rows.Next() {
-		auth := new(v1.Auth)
-		if err := rows.Scan(&auth.Id, &auth.Token, &auth.Description); err != nil {
-			return nil, status.Error(codes.Unknown, "failed to retrieve field values from Auth row-> "+err.Error())
+func (s *authServiceServer) GetPermissions(ctx context.Context, req *v1.GetPermissionsRequest) (*v1.GetPermissionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not implemented")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+
+type jwtClaims struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
+
+func generateAccessToken(userID, username string) (string, error) {
+	claims := jwtClaims{
+		UserID:   userID,
+		Username: username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenTTL)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Subject:   userID,
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(jwtSecret))
+}
+
+func generateRefreshToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// isUniqueViolation detects postgres unique constraint errors (code 23505).
+func isUniqueViolation(err error) bool {
+	return err != nil && (contains(err.Error(), "23505") || contains(err.Error(), "unique"))
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
 		}
-		list = append(list, auth)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, status.Error(codes.Unknown, "failed to retrieve data from Auth-> "+err.Error())
-	}
-
-	return &v1.ReadAllResponse{
-		Api:  apiVersion,
-		Auth: list,
-	}, nil
+	return false
 }

@@ -7,9 +7,10 @@ metadata:
     app.kubernetes.io/name: auth-service
     app.kubernetes.io/part-of: go-auth-ms
 data:
-  GRPC_PORT: "9090"
-  HTTP_PORT: "8080"
-  DB_HOST: "mysql:3306"
-  DB_SCHEMA: "authdb"
-  LOG_LEVEL: "0"
+  GRPC_PORT:       "9090"
+  HTTP_PORT:       "8080"
+  DB_HOST:         "postgres"
+  DB_SCHEMA:       "authdb"
+  DB_SSLMODE:      "disable"
+  LOG_LEVEL:       "0"
   LOG_TIME_FORMAT: "2006-01-02T15:04:05.999999999Z07:00"

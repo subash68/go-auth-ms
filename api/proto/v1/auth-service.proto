@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "v1/";
+option go_package = "github.com/subash68/authenticator/src/api/v1;v1";
 package v1;
 
 import "google/api/annotations.proto";
@@ -8,10 +8,10 @@ import "protoc-gen-swagger/options/annotations.proto";
 option (grpc.gateway.protoc_gen_swagger.options.openapiv2_swagger) = {
     info: {
         title: "Auth Service";
-        version: "1.0";
+        version: "2.0";
         contact: {
             name: "auth service project";
-            url: "https://github.com/subash68/bcm-auth";
+            url: "https://github.com/subash68/go-auth-ms";
             email: "bsubi68@gmail.com";
         };
     };
@@ -19,113 +19,213 @@ option (grpc.gateway.protoc_gen_swagger.options.openapiv2_swagger) = {
     consumes: "application/json";
     produces: "application/json";
     responses: {
+        key: "401";
+        value: {
+            description: "Returned when the request is not authenticated.";
+            schema: { json_schema: { type: STRING; } }
+        }
+    }
+    responses: {
+        key: "403";
+        value: {
+            description: "Returned when the caller lacks required permissions.";
+            schema: { json_schema: { type: STRING; } }
+        }
+    }
+    responses: {
         key: "404";
         value: {
             description: "Returned when the resource does not exist.";
-            schema: {
-                json_schema: {
-                    type: STRING;
-                }
-            }
+            schema: { json_schema: { type: STRING; } }
         }
     }
 };
 
-message Auth {
-    int64 id = 1;
-    string token = 2;
+// ─────────────────────────────────────────────────────────────
+// Shared / common messages
+// ─────────────────────────────────────────────────────────────
+
+message User {
+    string id         = 1;  // UUID
+    string username   = 2;
+    string first_name = 3;
+    string last_name  = 4;
+    string email      = 5;  // optional
+    bool   is_active  = 6;
+    string created_at = 7;  // RFC3339
+    string updated_at = 8;  // RFC3339
+}
+
+message Role {
+    int64  id          = 1;
+    string name        = 2;
     string description = 3;
 }
 
-message CreateRequest {
-    string api = 1;
-    Auth auth = 2;
+message Permission {
+    int64  id          = 1;
+    string name        = 2;  // e.g. "auth:login"
+    string description = 3;
 }
 
-message CreateResponse {
-    string api = 1;
-    int64 id = 2;
+// ─────────────────────────────────────────────────────────────
+// Register
+// ─────────────────────────────────────────────────────────────
+
+message RegisterRequest {
+    string username   = 1;  // required, alphanumeric + underscore
+    string password   = 2;  // required, plain-text (hashed server-side)
+    string first_name = 3;  // required
+    string last_name  = 4;  // required
+    string email      = 5;  // optional
 }
 
-message ReadRequest {
-    string api = 1;
-    int64 id = 2;
+message RegisterResponse {
+    string user_id  = 1;  // UUID of the created user
+    string username = 2;
 }
 
-message ReadResponse {
-    string api = 1;
-    Auth auth = 2;
+// ─────────────────────────────────────────────────────────────
+// Login
+// ─────────────────────────────────────────────────────────────
+
+message LoginRequest {
+    string username = 1;
+    string password = 2;
 }
 
-message UpdateRequest {
-    string api = 1;
-
-    Auth auth = 2;
+message LoginResponse {
+    string access_token   = 1;  // short-lived JWT
+    string refresh_token  = 2;  // long-lived, stored in sessions table
+    string token_type     = 3;  // "Bearer"
+    int64  expires_in     = 4;  // access token TTL in seconds
+    User   user           = 5;
 }
 
-message UpdateResponse {
-    string api = 1;
-    int64 updated = 2;
+// ─────────────────────────────────────────────────────────────
+// Logout
+// ─────────────────────────────────────────────────────────────
+
+message LogoutRequest {
+    string refresh_token = 1;  // the session to revoke
 }
 
-message DeleteRequest {
-    string api = 1;
-    int64 id = 2;
+message LogoutResponse {
+    bool   success = 1;
+    string message = 2;
 }
 
-message DeleteResponse {
-    string api = 1;
-    int64 deleted = 2;
+// ─────────────────────────────────────────────────────────────
+// RefreshToken
+// ─────────────────────────────────────────────────────────────
+
+message RefreshTokenRequest {
+    string refresh_token = 1;
 }
 
-message ReadAllRequest {
-    string api = 1;
+message RefreshTokenResponse {
+    string access_token  = 1;
+    string token_type    = 2;  // "Bearer"
+    int64  expires_in    = 3;  // seconds
 }
 
-message ReadAllResponse {
-    string api = 1;
-    repeated Auth auth = 2;
+// ─────────────────────────────────────────────────────────────
+// GetProfile
+// ─────────────────────────────────────────────────────────────
+
+message GetProfileRequest {
+    string user_id = 1;  // UUID
 }
 
+message GetProfileResponse {
+    User user = 1;
+}
+
+// ─────────────────────────────────────────────────────────────
+// AssignRole
+// ─────────────────────────────────────────────────────────────
+
+message AssignRoleRequest {
+    string user_id  = 1;  // UUID
+    string role_name = 2; // e.g. "admin", "user", "viewer"
+}
+
+message AssignRoleResponse {
+    bool   success = 1;
+    string message = 2;
+}
+
+// ─────────────────────────────────────────────────────────────
+// GetPermissions
+// ─────────────────────────────────────────────────────────────
+
+message GetPermissionsRequest {
+    string user_id = 1;  // UUID
+}
+
+message GetPermissionsResponse {
+    string            user_id     = 1;
+    repeated Role       roles       = 2;
+    repeated Permission permissions = 3;  // effective (union of all role permissions)
+}
+
+// ─────────────────────────────────────────────────────────────
+// AuthService
+// ─────────────────────────────────────────────────────────────
 
 service AuthService {
 
-    rpc ReadAll(ReadAllRequest) returns (ReadAllResponse) {
+    // Register a new user account
+    rpc Register(RegisterRequest) returns (RegisterResponse) {
         option (google.api.http) = {
-            get: "/v1/auth/all"
-        };
-    }
-    //Create call
-    rpc Create(CreateRequest) returns (CreateResponse) {
-        option (google.api.http) = {
-            post: "/v1/auth"
+            post: "/v1/auth/register"
             body: "*"
         };
     }
 
-    rpc Read(ReadRequest) returns (ReadResponse) {
+    // Login with username + password; returns JWT access + refresh tokens
+    rpc Login(LoginRequest) returns (LoginResponse) {
         option (google.api.http) = {
-            get: "/v1/auth/{id}"
-        };
-    }
-
-    rpc Update(UpdateRequest) returns (UpdateResponse) {
-        option (google.api.http) = {
-            put: "/v1/auth/{auth.id}"
+            post: "/v1/auth/login"
             body: "*"
-
-            additional_bindings {
-                patch: "/v1/auth/{auth.id}"
-                body: "*"
-            }
         };
     }
 
-    rpc Delete(DeleteRequest) returns (DeleteResponse) {
+    // Logout — revokes the given refresh token / session
+    rpc Logout(LogoutRequest) returns (LogoutResponse) {
         option (google.api.http) = {
-            delete: "/v1/auth/{id}"
+            post: "/v1/auth/logout"
+            body: "*"
         };
     }
 
-   
+    // Exchange a valid refresh token for a new access token
+    rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse) {
+        option (google.api.http) = {
+            post: "/v1/auth/refresh"
+            body: "*"
+        };
+    }
+
+    // Get a user's profile (authenticated users only)
+    rpc GetProfile(GetProfileRequest) returns (GetProfileResponse) {
+        option (google.api.http) = {
+            get: "/v1/users/{user_id}"
+        };
+    }
+
+    // Assign a role to a user (admin only)
+    rpc AssignRole(AssignRoleRequest) returns (AssignRoleResponse) {
+        option (google.api.http) = {
+            post: "/v1/users/{user_id}/roles"
+            body: "*"
+        };
+    }
+
+    // Get the effective roles and permissions for a user
+    rpc GetPermissions(GetPermissionsRequest) returns (GetPermissionsResponse) {
+        option (google.api.http) = {
+            get: "/v1/users/{user_id}/permissions"
+        };
+    }
 }

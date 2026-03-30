@@ -5,7 +5,7 @@ metadata:
   namespace: envoy-proxy
   labels:
     app.kubernetes.io/name: auth-service
-    app.kubernetes.io/version: "v1"
+    app.kubernetes.io/version: "v2"
     app.kubernetes.io/part-of: go-auth-ms
 spec:
   replicas: 2
@@ -17,30 +17,25 @@ spec:
       labels:
         app: auth-service
         app.kubernetes.io/name: auth-service
-        app.kubernetes.io/version: "v1"
+        app.kubernetes.io/version: "v2"
         app.kubernetes.io/part-of: go-auth-ms
     spec:
-      # Wait for MySQL to be reachable before starting the container.
-      # initContainers gives us a retry loop without complicating the main binary.
       initContainers:
-        - name: wait-for-mysql
+        - name: wait-for-postgres
           image: busybox:1.36
           command:
             - sh
             - -c
             - |
-              until nc -z mysql 3306; do
-                echo "Waiting for MySQL…"
+              until nc -z postgres 5432; do
+                echo "Waiting for PostgreSQL..."
                 sleep 2
               done
-              echo "MySQL is up."
-
+              echo "PostgreSQL is up."
       containers:
         - name: auth-service
-          # Replace with your actual image once pushed to a registry, e.g.:
-          #   image: ghcr.io/subash68/go-auth-ms:latest
-          image: go-auth-ms:latest
-          imagePullPolicy: IfNotPresent   # use Never for local minikube/kind
+          image: go-auth-ms:v2
+          imagePullPolicy: IfNotPresent
           ports:
             - name: grpc
               containerPort: 9090
@@ -55,10 +50,10 @@ spec:
             - "-db-user=$(DB_USER)"
             - "-db-password=$(DB_PASSWORD)"
             - "-db-schema=$(DB_SCHEMA)"
+            - "-db-sslmode=$(DB_SSLMODE)"
             - "-log-level=$(LOG_LEVEL)"
             - "-log-time-format=$(LOG_TIME_FORMAT)"
           env:
-            # ── Non-sensitive config from ConfigMap ──────────────────────────
             - name: GRPC_PORT
               valueFrom:
                 configMapKeyRef:
@@ -79,6 +74,11 @@ spec:
                 configMapKeyRef:
                   name: auth-service-config
                   key: DB_SCHEMA
+            - name: DB_SSLMODE
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-service-config
+                  key: DB_SSLMODE
             - name: LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -89,20 +89,16 @@ spec:
                 configMapKeyRef:
                   name: auth-service-config
                   key: LOG_TIME_FORMAT
-            # ── Sensitive config from Secret ─────────────────────────────────
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
                   name: auth-db-secret
-                  key: mysql-user
+                  key: postgres-user
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: auth-db-secret
-                  key: mysql-password
-
-
-          # ── Resource limits ──────────────────────────────────────────────
+                  key: postgres-password
           resources:
             requests:
               cpu: 100m

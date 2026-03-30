@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: envoy-proxy
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: go-auth-ms
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
