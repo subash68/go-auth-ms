@@ -101,21 +101,6 @@ spec:
                   name: auth-db-secret
                   key: mysql-password
 
-          # ── Health probes ────────────────────────────────────────────────
-          # The HTTP gateway exposes /healthz; fall back to TCP if not present.
-          readinessProbe:
-            tcpSocket:
-              port: grpc
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 3
-
-          livenessProbe:
-            tcpSocket:
-              port: grpc
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            failureThreshold: 3
 
           # ── Resource limits ──────────────────────────────────────────────
           resources:

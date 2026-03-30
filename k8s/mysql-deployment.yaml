@@ -59,30 +59,6 @@ spec:
             limits:
               cpu: 500m
               memory: 1Gi
-          livenessProbe:
-            exec:
-              command:
-                - mysqladmin
-                - ping
-                - -h
-                - localhost
-                - -uroot
-                - -p$(MYSQL_ROOT_PASSWORD)
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-          readinessProbe:
-            exec:
-              command:
-                - mysqladmin
-                - ping
-                - -h
-                - localhost
-                - -uroot
-                - -p$(MYSQL_ROOT_PASSWORD)
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
       volumes:
         - name: mysql-data
           persistentVolumeClaim:
