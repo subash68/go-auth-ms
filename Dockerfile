@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the server binary; CGO disabled for a fully-static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=mod go build -o /bin/server ./cmd/server
 
 # ─── Stage 2: Run ────────────────────────────────────────────────────────────
 FROM alpine:3.18

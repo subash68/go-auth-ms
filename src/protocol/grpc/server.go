@@ -18,7 +18,7 @@ func RunServer(ctx context.Context, v1API v1.AuthServiceServer, port string) err
 	log.Println(port)
 
 	// listen, err := net.Listen("tcp", ":"+ port)
-	listen, err := net.Listen("tcp", fmt.Sprintf("localhost:%s", port))
+	listen, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 
 	if err != nil {
 		log.Println("Checking port number interpretation")
