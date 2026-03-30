@@ -2,17 +2,20 @@ package v1
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"fmt"
 	"testing"
 
-	"github.com/DATA-DOG/go-sqlmock"
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/subash68/authenticator/src/api/v1"
 )
 
-// helper: create a server backed by a mock DB
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 func newTestServer(t *testing.T) (v1.AuthServiceServer, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -23,7 +26,6 @@ func newTestServer(t *testing.T) (v1.AuthServiceServer, sqlmock.Sqlmock) {
 	return NewAuthServiceServer(db), mock
 }
 
-// helper: extract the gRPC code from an error
 func grpcCode(err error) codes.Code {
 	if err == nil {
 		return codes.OK
@@ -35,275 +37,519 @@ func grpcCode(err error) codes.Code {
 	return s.Code()
 }
 
-func TestCreate(t *testing.T) {
-	tests := []struct {
-		name     string
-		req      *v1.CreateRequest
-		setup    func(sqlmock.Sqlmock)
-		wantID   int64
-		wantCode codes.Code
-	}{
-		{
-			name: "success",
-			req:  &v1.CreateRequest{Api: "v1", Auth: &v1.Auth{Token: "tok1", Description: "desc1"}},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("INSERT INTO Auth").WithArgs("tok1", "desc1").WillReturnResult(sqlmock.NewResult(42, 1))
-			},
-			wantID: 42, wantCode: codes.OK,
-		},
-		{
-			name:     "wrong api version",
-			req:      &v1.CreateRequest{Api: "v2", Auth: &v1.Auth{Token: "tok", Description: "desc"}},
-			setup:    func(m sqlmock.Sqlmock) {},
-			wantCode: codes.Unimplemented,
-		},
-		{
-			name: "db insert error",
-			req:  &v1.CreateRequest{Api: "v1", Auth: &v1.Auth{Token: "tok", Description: "desc"}},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("INSERT INTO Auth").WithArgs("tok", "desc").WillReturnError(errors.New("insert failed"))
-			},
-			wantCode: codes.Unknown,
-		},
+func mustHashPassword(t *testing.T, pw string) string {
+	t.Helper()
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, mock := newTestServer(t)
-			tc.setup(mock)
-			resp, err := srv.Create(context.Background(), tc.req)
-			if grpcCode(err) != tc.wantCode {
-				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
-			}
-			if tc.wantCode == codes.OK {
-				if resp == nil { t.Fatal("expected non-nil response") }
-				if resp.Id != tc.wantID { t.Errorf("got id %d, want %d", resp.Id, tc.wantID) }
-				if resp.Api != apiVersion { t.Errorf("got api %q, want %q", resp.Api, apiVersion) }
-			}
-			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
-		})
-	}
+	return string(h)
 }
 
-func TestRead(t *testing.T) {
-	cols := []string{"ID", "Token", "Description"}
+// ─── Register ─────────────────────────────────────────────────────────────────
+
+func TestRegister(t *testing.T) {
+	const (
+		validUser  = "alice"
+		validPass  = "secret123"
+		validFirst = "Alice"
+		validLast  = "Smith"
+	)
+
+	validReq := &v1.RegisterRequest{
+		Username:  validUser,
+		Password:  validPass,
+		FirstName: validFirst,
+		LastName:  validLast,
+	}
+
 	tests := []struct {
 		name     string
-		req      *v1.ReadRequest
+		req      *v1.RegisterRequest
 		setup    func(sqlmock.Sqlmock)
-		wantAuth *v1.Auth
 		wantCode codes.Code
 	}{
 		{
 			name: "success",
-			req:  &v1.ReadRequest{Api: "v1", Id: 1},
+			req:  validReq,
 			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(1)).
-					WillReturnRows(sqlmock.NewRows(cols).AddRow(1, "tok1", "desc1"))
+				m.ExpectBegin()
+				m.ExpectExec("INSERT INTO users").
+					WithArgs(sqlmock.AnyArg(), validUser, validFirst, validLast, nil, sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectExec("INSERT INTO user_roles").
+					WithArgs(sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectCommit()
 			},
-			wantAuth: &v1.Auth{Id: 1, Token: "tok1", Description: "desc1"}, wantCode: codes.OK,
+			wantCode: codes.OK,
 		},
 		{
-			name: "not found",
-			req:  &v1.ReadRequest{Api: "v1", Id: 99},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(99)).WillReturnRows(sqlmock.NewRows(cols))
+			name: "success with optional email",
+			req: &v1.RegisterRequest{
+				Username: "bob", Password: validPass,
+				FirstName: "Bob", LastName: "Jones", Email: "bob@example.com",
 			},
-			wantCode: codes.NotFound,
+			setup: func(m sqlmock.Sqlmock) {
+				email := "bob@example.com"
+				m.ExpectBegin()
+				m.ExpectExec("INSERT INTO users").
+					WithArgs(sqlmock.AnyArg(), "bob", "Bob", "Jones", &email, sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectExec("INSERT INTO user_roles").
+					WithArgs(sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectCommit()
+			},
+			wantCode: codes.OK,
 		},
 		{
-			name: "wrong api version", req: &v1.ReadRequest{Api: "v2", Id: 1},
-			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+			name:     "missing username",
+			req:      &v1.RegisterRequest{Password: validPass, FirstName: validFirst, LastName: validLast},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
 		},
 		{
-			name: "db query error",
-			req:  &v1.ReadRequest{Api: "v1", Id: 1},
+			name:     "missing password",
+			req:      &v1.RegisterRequest{Username: validUser, FirstName: validFirst, LastName: validLast},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "missing first_name",
+			req:      &v1.RegisterRequest{Username: validUser, Password: validPass, LastName: validLast},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "missing last_name",
+			req:      &v1.RegisterRequest{Username: validUser, Password: validPass, FirstName: validFirst},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "invalid username with special chars",
+			req:      &v1.RegisterRequest{Username: "alice!", Password: validPass, FirstName: validFirst, LastName: validLast},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "invalid username with spaces",
+			req:      &v1.RegisterRequest{Username: "alice bob", Password: validPass, FirstName: validFirst, LastName: validLast},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "duplicate username",
+			req:  validReq,
 			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth WHERE").WithArgs(int64(1)).WillReturnError(errors.New("query failed"))
+				m.ExpectBegin()
+				m.ExpectExec("INSERT INTO users").
+					WillReturnError(fmt.Errorf("pq: duplicate key value violates unique constraint (23505)"))
+				m.ExpectRollback()
 			},
-			wantCode: codes.Unknown,
+			wantCode: codes.AlreadyExists,
+		},
+		{
+			name: "begin tx failure",
+			req:  validReq,
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectBegin().WillReturnError(fmt.Errorf("connection error"))
+			},
+			wantCode: codes.Internal,
+		},
+		{
+			name: "insert user db error",
+			req:  validReq,
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectBegin()
+				m.ExpectExec("INSERT INTO users").
+					WillReturnError(fmt.Errorf("db error"))
+				m.ExpectRollback()
+			},
+			wantCode: codes.Internal,
+		},
+		{
+			name: "assign role db error",
+			req:  validReq,
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectBegin()
+				m.ExpectExec("INSERT INTO users").
+					WithArgs(sqlmock.AnyArg(), validUser, validFirst, validLast, nil, sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				m.ExpectExec("INSERT INTO user_roles").
+					WillReturnError(fmt.Errorf("role table error"))
+				m.ExpectRollback()
+			},
+			wantCode: codes.Internal,
 		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, mock := newTestServer(t)
 			tc.setup(mock)
-			resp, err := srv.Read(context.Background(), tc.req)
-			if grpcCode(err) != tc.wantCode {
-				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			resp, err := srv.Register(context.Background(), tc.req)
+			if got := grpcCode(err); got != tc.wantCode {
+				t.Errorf("code: got %v, want %v (err: %v)", got, tc.wantCode, err)
 			}
 			if tc.wantCode == codes.OK {
-				if resp == nil || resp.Auth == nil { t.Fatal("expected non-nil response and auth") }
-				if resp.Auth.Id != tc.wantAuth.Id || resp.Auth.Token != tc.wantAuth.Token || resp.Auth.Description != tc.wantAuth.Description {
-					t.Errorf("got auth %+v, want %+v", resp.Auth, tc.wantAuth)
+				if resp == nil {
+					t.Fatal("expected non-nil response")
+				}
+				if resp.UserId == "" {
+					t.Error("expected non-empty user_id")
+				}
+				if resp.Username != tc.req.Username {
+					t.Errorf("username: got %q, want %q", resp.Username, tc.req.Username)
 				}
 			}
-			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
 		})
 	}
 }
 
-func TestUpdate(t *testing.T) {
-	tests := []struct {
-		name        string
-		req         *v1.UpdateRequest
-		setup       func(sqlmock.Sqlmock)
-		wantUpdated int64
-		wantCode    codes.Code
-	}{
-		{
-			name: "success",
-			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 1, Token: "new-tok", Description: "new-desc"}},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("UPDATE Auth").WithArgs("new-tok", "new-desc", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
-			},
-			wantUpdated: 1, wantCode: codes.OK,
-		},
-		{
-			name: "not found",
-			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 99, Token: "tok", Description: "desc"}},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("UPDATE Auth").WithArgs("tok", "desc", int64(99)).WillReturnResult(sqlmock.NewResult(0, 0))
-			},
-			wantCode: codes.NotFound,
-		},
-		{
-			name: "wrong api version",
-			req:  &v1.UpdateRequest{Api: "v2", Auth: &v1.Auth{Id: 1, Token: "tok", Description: "desc"}},
-			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
-		},
-		{
-			name: "db exec error",
-			req:  &v1.UpdateRequest{Api: "v1", Auth: &v1.Auth{Id: 1, Token: "tok", Description: "desc"}},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("UPDATE Auth").WithArgs("tok", "desc", int64(1)).WillReturnError(errors.New("update failed"))
-			},
-			wantCode: codes.Unknown,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, mock := newTestServer(t)
-			tc.setup(mock)
-			resp, err := srv.Update(context.Background(), tc.req)
-			if grpcCode(err) != tc.wantCode {
-				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
-			}
-			if tc.wantCode == codes.OK {
-				if resp == nil { t.Fatal("expected non-nil response") }
-				if resp.Updated != tc.wantUpdated { t.Errorf("got updated %d, want %d", resp.Updated, tc.wantUpdated) }
-			}
-			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
-		})
-	}
-}
+// ─── Login ────────────────────────────────────────────────────────────────────
 
-func TestDelete(t *testing.T) {
-	tests := []struct {
-		name        string
-		req         *v1.DeleteRequest
-		setup       func(sqlmock.Sqlmock)
-		wantDeleted int64
-		wantCode    codes.Code
-	}{
-		{
-			name: "success",
-			req:  &v1.DeleteRequest{Api: "v1", Id: 1},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
-			},
-			wantDeleted: 1, wantCode: codes.OK,
-		},
-		{
-			name: "not found",
-			req:  &v1.DeleteRequest{Api: "v1", Id: 99},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(99)).WillReturnResult(sqlmock.NewResult(0, 0))
-			},
-			wantCode: codes.NotFound,
-		},
-		{
-			name: "wrong api version", req: &v1.DeleteRequest{Api: "v2", Id: 1},
-			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
-		},
-		{
-			name: "db exec error",
-			req:  &v1.DeleteRequest{Api: "v1", Id: 1},
-			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectExec("DELETE FROM Auth").WithArgs(int64(1)).WillReturnError(errors.New("delete failed"))
-			},
-			wantCode: codes.Unknown,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, mock := newTestServer(t)
-			tc.setup(mock)
-			resp, err := srv.Delete(context.Background(), tc.req)
-			if grpcCode(err) != tc.wantCode {
-				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
-			}
-			if tc.wantCode == codes.OK {
-				if resp == nil { t.Fatal("expected non-nil response") }
-				if resp.Deleted != tc.wantDeleted { t.Errorf("got deleted %d, want %d", resp.Deleted, tc.wantDeleted) }
-			}
-			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
-		})
-	}
-}
+func TestLogin(t *testing.T) {
+	const (
+		userID    = "11111111-1111-1111-1111-111111111111"
+		username  = "alice"
+		password  = "secret123"
+		firstName = "Alice"
+		lastName  = "Smith"
+	)
 
-func TestReadAll(t *testing.T) {
-	cols := []string{"ID", "Token", "Description"}
+	// Pre-compute hash once to avoid repeated bcrypt work.
+	hash := mustHashPassword(t, password)
+
+	loginCols := []string{"id", "password_hash", "first_name", "last_name", "email", "is_active"}
+
 	tests := []struct {
 		name     string
-		req      *v1.ReadAllRequest
+		req      *v1.LoginRequest
 		setup    func(sqlmock.Sqlmock)
-		wantLen  int
 		wantCode codes.Code
 	}{
 		{
-			name: "success multiple rows",
-			req:  &v1.ReadAllRequest{Api: "v1"},
+			name: "success",
+			req:  &v1.LoginRequest{Username: username, Password: password},
 			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth").
-					WillReturnRows(sqlmock.NewRows(cols).AddRow(1, "tok1", "desc1").AddRow(2, "tok2", "desc2"))
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnRows(sqlmock.NewRows(loginCols).
+						AddRow(userID, hash, firstName, lastName, sql.NullString{}, true))
+				m.ExpectExec("INSERT INTO sessions").
+					WithArgs(sqlmock.AnyArg(), userID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
 			},
-			wantLen: 2, wantCode: codes.OK,
+			wantCode: codes.OK,
 		},
 		{
-			name: "empty table",
-			req:  &v1.ReadAllRequest{Api: "v1"},
+			name: "success with email",
+			req:  &v1.LoginRequest{Username: username, Password: password},
 			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth").WillReturnRows(sqlmock.NewRows(cols))
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnRows(sqlmock.NewRows(loginCols).
+						AddRow(userID, hash, firstName, lastName,
+							sql.NullString{String: "alice@example.com", Valid: true}, true))
+				m.ExpectExec("INSERT INTO sessions").
+					WithArgs(sqlmock.AnyArg(), userID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+					WillReturnResult(sqlmock.NewResult(0, 1))
 			},
-			wantLen: 0, wantCode: codes.OK,
+			wantCode: codes.OK,
 		},
 		{
-			name: "wrong api version", req: &v1.ReadAllRequest{Api: "v2"},
-			setup: func(m sqlmock.Sqlmock) {}, wantCode: codes.Unimplemented,
+			name:     "missing username",
+			req:      &v1.LoginRequest{Password: password},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "missing password",
+			req:      &v1.LoginRequest{Username: username},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "user not found",
+			req:  &v1.LoginRequest{Username: "ghost", Password: password},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs("ghost").
+					WillReturnRows(sqlmock.NewRows(loginCols))
+			},
+			wantCode: codes.Unauthenticated,
+		},
+		{
+			name: "wrong password",
+			req:  &v1.LoginRequest{Username: username, Password: "wrongpass"},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnRows(sqlmock.NewRows(loginCols).
+						AddRow(userID, hash, firstName, lastName, sql.NullString{}, true))
+			},
+			wantCode: codes.Unauthenticated,
+		},
+		{
+			name: "inactive account",
+			req:  &v1.LoginRequest{Username: username, Password: password},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnRows(sqlmock.NewRows(loginCols).
+						AddRow(userID, hash, firstName, lastName, sql.NullString{}, false))
+			},
+			wantCode: codes.PermissionDenied,
 		},
 		{
 			name: "db query error",
-			req:  &v1.ReadAllRequest{Api: "v1"},
+			req:  &v1.LoginRequest{Username: username, Password: password},
 			setup: func(m sqlmock.Sqlmock) {
-				m.ExpectQuery("SELECT (.+) FROM Auth").WillReturnError(errors.New("query failed"))
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnError(fmt.Errorf("connection lost"))
 			},
-			wantCode: codes.Unknown,
+			wantCode: codes.Internal,
+		},
+		{
+			name: "session insert error",
+			req:  &v1.LoginRequest{Username: username, Password: password},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT id, password_hash").
+					WithArgs(username).
+					WillReturnRows(sqlmock.NewRows(loginCols).
+						AddRow(userID, hash, firstName, lastName, sql.NullString{}, true))
+				m.ExpectExec("INSERT INTO sessions").
+					WillReturnError(fmt.Errorf("insert failed"))
+			},
+			wantCode: codes.Internal,
 		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, mock := newTestServer(t)
 			tc.setup(mock)
-			resp, err := srv.ReadAll(context.Background(), tc.req)
-			if grpcCode(err) != tc.wantCode {
-				t.Errorf("got code %v, want %v (err: %v)", grpcCode(err), tc.wantCode, err)
+			resp, err := srv.Login(context.Background(), tc.req)
+			if got := grpcCode(err); got != tc.wantCode {
+				t.Errorf("code: got %v, want %v (err: %v)", got, tc.wantCode, err)
 			}
 			if tc.wantCode == codes.OK {
-				if resp == nil { t.Fatal("expected non-nil response") }
-				if len(resp.Auth) != tc.wantLen { t.Errorf("got %d rows, want %d", len(resp.Auth), tc.wantLen) }
-				if resp.Api != apiVersion { t.Errorf("got api %q, want %q", resp.Api, apiVersion) }
+				if resp == nil {
+					t.Fatal("expected non-nil response")
+				}
+				if resp.AccessToken == "" {
+					t.Error("expected non-empty access_token")
+				}
+				if resp.RefreshToken == "" {
+					t.Error("expected non-empty refresh_token")
+				}
+				if resp.TokenType != "Bearer" {
+					t.Errorf("token_type: got %q, want Bearer", resp.TokenType)
+				}
+				if resp.ExpiresIn != int64(accessTokenTTL.Seconds()) {
+					t.Errorf("expires_in: got %d, want %d", resp.ExpiresIn, int64(accessTokenTTL.Seconds()))
+				}
+				if resp.User == nil {
+					t.Fatal("expected non-nil user in response")
+				}
+				if resp.User.Id != userID {
+					t.Errorf("user.id: got %q, want %q", resp.User.Id, userID)
+				}
 			}
-			if err := mock.ExpectationsWereMet(); err != nil { t.Errorf("unmet mock expectations: %v", err) }
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
 		})
+	}
+}
+
+// ─── Logout ───────────────────────────────────────────────────────────────────
+
+func TestLogout(t *testing.T) {
+	const token = "valid-refresh-token-abc123"
+
+	tests := []struct {
+		name     string
+		req      *v1.LogoutRequest
+		setup    func(sqlmock.Sqlmock)
+		wantCode codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.LogoutRequest{RefreshToken: token},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE sessions").
+					WithArgs(token).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+			wantCode: codes.OK,
+		},
+		{
+			name:     "missing refresh_token",
+			req:      &v1.LogoutRequest{},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "token not found or already revoked",
+			req:  &v1.LogoutRequest{RefreshToken: token},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE sessions").
+					WithArgs(token).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			wantCode: codes.NotFound,
+		},
+		{
+			name: "db error",
+			req:  &v1.LogoutRequest{RefreshToken: token},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectExec("UPDATE sessions").
+					WithArgs(token).
+					WillReturnError(fmt.Errorf("db connection lost"))
+			},
+			wantCode: codes.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.Logout(context.Background(), tc.req)
+			if got := grpcCode(err); got != tc.wantCode {
+				t.Errorf("code: got %v, want %v (err: %v)", got, tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil {
+					t.Fatal("expected non-nil response")
+				}
+				if !resp.Success {
+					t.Error("expected success=true")
+				}
+				if resp.Message == "" {
+					t.Error("expected non-empty message")
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
+		})
+	}
+}
+
+// ─── RefreshToken ─────────────────────────────────────────────────────────────
+
+func TestRefreshToken(t *testing.T) {
+	const (
+		refreshTok = "valid-refresh-token-xyz789"
+		userID     = "22222222-2222-2222-2222-222222222222"
+		username   = "alice"
+	)
+
+	refreshCols := []string{"user_id", "username"}
+
+	tests := []struct {
+		name     string
+		req      *v1.RefreshTokenRequest
+		setup    func(sqlmock.Sqlmock)
+		wantCode codes.Code
+	}{
+		{
+			name: "success",
+			req:  &v1.RefreshTokenRequest{RefreshToken: refreshTok},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT s.user_id").
+					WithArgs(refreshTok).
+					WillReturnRows(sqlmock.NewRows(refreshCols).AddRow(userID, username))
+			},
+			wantCode: codes.OK,
+		},
+		{
+			name:     "missing refresh_token",
+			req:      &v1.RefreshTokenRequest{},
+			setup:    func(m sqlmock.Sqlmock) {},
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "token invalid or expired",
+			req:  &v1.RefreshTokenRequest{RefreshToken: "expired-token"},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT s.user_id").
+					WithArgs("expired-token").
+					WillReturnRows(sqlmock.NewRows(refreshCols))
+			},
+			wantCode: codes.Unauthenticated,
+		},
+		{
+			name: "db error",
+			req:  &v1.RefreshTokenRequest{RefreshToken: refreshTok},
+			setup: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery("SELECT s.user_id").
+					WithArgs(refreshTok).
+					WillReturnError(fmt.Errorf("db connection lost"))
+			},
+			wantCode: codes.Internal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mock := newTestServer(t)
+			tc.setup(mock)
+			resp, err := srv.RefreshToken(context.Background(), tc.req)
+			if got := grpcCode(err); got != tc.wantCode {
+				t.Errorf("code: got %v, want %v (err: %v)", got, tc.wantCode, err)
+			}
+			if tc.wantCode == codes.OK {
+				if resp == nil {
+					t.Fatal("expected non-nil response")
+				}
+				if resp.AccessToken == "" {
+					t.Error("expected non-empty access_token")
+				}
+				if resp.TokenType != "Bearer" {
+					t.Errorf("token_type: got %q, want Bearer", resp.TokenType)
+				}
+				if resp.ExpiresIn != int64(accessTokenTTL.Seconds()) {
+					t.Errorf("expires_in: got %d, want %d", resp.ExpiresIn, int64(accessTokenTTL.Seconds()))
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
+		})
+	}
+}
+
+// ─── Unimplemented stubs ──────────────────────────────────────────────────────
+
+func TestGetProfile_Unimplemented(t *testing.T) {
+	srv, _ := newTestServer(t)
+	_, err := srv.GetProfile(context.Background(), &v1.GetProfileRequest{UserId: "any"})
+	if got := grpcCode(err); got != codes.Unimplemented {
+		t.Errorf("code: got %v, want Unimplemented", got)
+	}
+}
+
+func TestAssignRole_Unimplemented(t *testing.T) {
+	srv, _ := newTestServer(t)
+	_, err := srv.AssignRole(context.Background(), &v1.AssignRoleRequest{UserId: "any", RoleName: "admin"})
+	if got := grpcCode(err); got != codes.Unimplemented {
+		t.Errorf("code: got %v, want Unimplemented", got)
+	}
+}
+
+func TestGetPermissions_Unimplemented(t *testing.T) {
+	srv, _ := newTestServer(t)
+	_, err := srv.GetPermissions(context.Background(), &v1.GetPermissionsRequest{UserId: "any"})
+	if got := grpcCode(err); got != codes.Unimplemented {
+		t.Errorf("code: got %v, want Unimplemented", got)
 	}
 }
